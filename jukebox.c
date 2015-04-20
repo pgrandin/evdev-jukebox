@@ -44,6 +44,7 @@
 #include <alsa/asoundlib.h>
 
 #include <linux/input.h>
+#include "findpowermate.h"
 #include "lpd8806.h"
 #include "jukebox.h"
 
@@ -51,6 +52,7 @@ pthread_t evdev_thread;
 pthread_t lpd_thread;
 int clic_start_time;
 int last_scroll_event;
+int evdev_fd;
 
 char *events[EV_MAX + 1] = {
         [0 ... EV_MAX] = NULL,
@@ -138,6 +140,7 @@ static void try_jukebox_start(void)
 	g_currenttrack = t;
 
 	printf("jukebox: Now playing \"%s\"...\n", sp_track_name(t));
+	powermate_pulse_led(255, 0, 0, 0, 0);
 	pthread_mutex_lock(&playback_status_lock);
         is_playing=1;
 	pthread_mutex_unlock(&playback_status_lock);
@@ -564,20 +567,69 @@ media_toggle_playback ()
     else
       {
 	  printf ("resuming playback\n");
-	  try_jukebox_start ();
       }
     is_playing = !is_playing;
-    sp_session_player_play (g_sess, 0);
+    sp_session_player_play (g_sess, is_playing);
+    powermate_pulse_led(is_playing ? 255 : 0, 0, 0, 0, 0);
     pthread_mutex_unlock(&playback_status_lock);
+    try_jukebox_start ();
+}
+
+void powermate_pulse_led(int static_brightness, int pulse_speed, int pulse_table, int pulse_asleep, int pulse_awake)
+{
+  int fd;
+
+  fd = find_powermate(O_WRONLY);
+
+  if(fd < 0){
+    fprintf(stderr, "Unable to locate powermate\n");
+    return 1;
+  }
+  struct input_event ev;
+  memset(&ev, 0, sizeof(struct input_event));
+
+  static_brightness &= 0xFF;
+
+  if(pulse_speed < 0)
+    pulse_speed = 0;
+  if(pulse_speed > 510)
+    pulse_speed = 510;
+  if(pulse_table < 0)
+    pulse_table = 0;
+  if(pulse_table > 2)
+    pulse_table = 2;
+  pulse_asleep = !!pulse_asleep;
+  pulse_awake = !!pulse_awake;
+
+  ev.type = EV_MSC;
+  ev.code = MSC_PULSELED;
+  ev.value = static_brightness | (pulse_speed << 8) | (pulse_table << 17) | (pulse_asleep << 19) | (pulse_awake << 20);
+
+  if(write(fd, &ev, sizeof(struct input_event)) != sizeof(struct input_event))
+    fprintf(stderr, "write(): %s\n", strerror(errno));
 }
 
 void *
 process_evdev_events(void )
 {
-     int evdev_fd;
      struct input_event ev[64];
      int clic_duration;
      int i;
+
+  int static_brightness = 0x80;
+  int pulse_speed = 255;
+  int pulse_table = 0;
+  int pulse_asleep = 1;
+  int pulse_awake = 0;
+
+    evdev_fd = find_powermate(O_WRONLY);
+
+  if(evdev_fd < 0){
+    fprintf(stderr, "Unable to locate powermate\n");
+    return 1;
+  }
+  pulse_awake=1;
+  powermate_pulse_led(static_brightness, pulse_speed, pulse_table, pulse_asleep, pulse_awake);
 
         if ((evdev_fd = open("/dev/input/by-id/usb-Griffin_Technology__Inc._Griffin_PowerMate-event-if00", O_RDONLY)) < 0) {
                 perror("jukebox");
@@ -621,6 +673,8 @@ process_evdev_events(void )
 	}
      }
      printf("Thread loop finished\n");
+     close(evdev_fd);
+     pthread_exit(NULL);
 }
 
 int main(int argc, char **argv)

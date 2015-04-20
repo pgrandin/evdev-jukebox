@@ -14,7 +14,7 @@ AUDIO_DRIVER ?= alsa
 endif
 
 TARGET = jukebox
-OBJS = $(TARGET).o appkey.o $(AUDIO_DRIVER)-audio.o audio.o lpd8806led.o lpd8806.o
+OBJS = $(TARGET).o appkey.o $(AUDIO_DRIVER)-audio.o audio.o lpd8806led.o lpd8806.o findpowermate.o
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -pthread  $^ -o $@ $(LDLIBS)
@@ -26,7 +26,7 @@ endif
 
 include common.mk
 
-
+findpowermate.o: findpowermate.c findpowermate.h
 lpd8806led.o: lpd8806led.c lpd8806led.h
 lpd8806.o: lpd8806.c lpd8806.h
 audio.o: audio.c audio.h
