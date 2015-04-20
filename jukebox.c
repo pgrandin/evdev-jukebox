@@ -38,9 +38,25 @@
 #include <sys/time.h>
 
 #include <libspotify/api.h>
+#include <fcntl.h>
 
 #include "audio.h"
+#include <alsa/asoundlib.h>
 
+#include <linux/input.h>
+
+pthread_t evdev_thread;
+int clic_start_time;
+int last_scroll_event;
+char *events[EV_MAX + 1] = {
+        [0 ... EV_MAX] = NULL,
+        [EV_SYN] = "Sync",                      [EV_KEY] = "Key",
+        [EV_REL] = "Relative",                  [EV_ABS] = "Absolute",
+        [EV_MSC] = "Misc",                      [EV_LED] = "LED",
+        [EV_SND] = "Sound",                     [EV_REP] = "Repeat",
+        [EV_FF] = "ForceFeedback",              [EV_PWR] = "Power",
+        [EV_FF_STATUS] = "ForceFeedbackStatus",
+};
 
 /* --- Data --- */
 /// The application key is specific to each project, and allows Spotify
@@ -72,6 +88,8 @@ static sp_track *g_currenttrack;
 /// Index to the next track
 static int g_track_index;
 
+
+int is_playing=0;
 
 /**
  * Called on various events to start playback if it hasn't been started already.
@@ -116,6 +134,7 @@ static void try_jukebox_start(void)
 	g_currenttrack = t;
 
 	printf("jukebox: Now playing \"%s\"...\n", sp_track_name(t));
+        is_playing=1;
 	fflush(stdout);
 
 	sp_session_player_load(g_sess, t);
@@ -493,11 +512,116 @@ static void usage(const char *progname)
 	fprintf(stderr, "warning: -d will delete the tracks played from the list!\n");
 }
 
+void SetAlsaMasterVolume(int direction)
+{
+    long min, max;
+    long outvol;
+    long volume;
+    snd_mixer_t *handle;
+    snd_mixer_selem_id_t *sid;
+    const char *card = "default";
+    const char *selem_name = "PCM";
+
+    snd_mixer_open(&handle, 0);
+    snd_mixer_attach(handle, card);
+    snd_mixer_selem_register(handle, NULL, NULL);
+    snd_mixer_load(handle);
+
+    snd_mixer_selem_id_alloca(&sid);
+    snd_mixer_selem_id_set_index(sid, 0);
+    snd_mixer_selem_id_set_name(sid, selem_name);
+    snd_mixer_elem_t* elem = snd_mixer_find_selem(handle, sid);
+    snd_mixer_selem_get_playback_volume_range(elem, &min, &max);
+    outvol=0;
+    if ( snd_mixer_selem_get_playback_volume(elem, 0, &outvol) ) {
+        snd_mixer_close(handle);
+        return;
+    }
+    // FIXME : use dB instead
+    volume=outvol+(direction*10);
+    if(volume<min)
+	volume=min;
+    if(volume>max)
+	volume=max;
+    snd_mixer_selem_set_playback_volume_all(elem, volume);
+    snd_mixer_close(handle);
+}
+
+void
+media_toggle_playback ()
+{
+    if (is_playing)
+      {
+	  printf ("pausing playback\n");
+	  sp_session_player_play (g_sess, 0);
+      }
+    else
+      {
+	  printf ("resuming playback\n");
+	  sp_session_player_play (g_sess, 1);
+	  try_jukebox_start ();
+      }
+    is_playing = !is_playing;
+}
+
+void *
+process_evdev_events(void )
+{
+     int evdev_fd, spi_fd;
+     struct input_event ev[64];
+     int clic_duration;
+     int i;
+
+        if ((evdev_fd = open("/dev/input/by-id/usb-Griffin_Technology__Inc._Griffin_PowerMate-event-if00", O_RDONLY)) < 0) {
+                perror("jukebox");
+                return 1;
+        }
+     printf("Starting thread loop\n");
+     for (;;) {
+         int rd = read(evdev_fd, ev, sizeof(struct input_event) * 64);
+         if (rd < (int) sizeof(struct input_event)) {
+                 perror("\njukebox: error reading");
+                 pthread_exit(NULL);
+         }
+	for (i = 0; i < rd / sizeof(struct input_event); i++){
+                     if ( ev[i].type == 1 ) {
+                             if ( ev[i].value == 1 ) {
+                                     clic_start_time=ev[i].time.tv_sec * 1000000 + ev[i].time.tv_usec;
+                             } else {
+                                     clic_duration=( ev[i].time.tv_sec * 1000000 + ev[i].time.tv_usec - clic_start_time ) /1000;
+                                     printf("That's a release, duration %ld ms\n", clic_duration );
+                                     if ( clic_duration > 3000 ) {
+                                             sync();
+                                             // reboot(RB_POWER_OFF);
+                                     } else if ( clic_duration > 500 ) {
+                                             printf ("That was a long clic!\n");
+                                     } else {
+                                             printf ("That was a short clic!\n");
+                                             media_toggle_playback();
+                                     }
+                             }
+                     } else if ( ev[i].type == 2 ) {
+                                SetAlsaMasterVolume(ev[i].value);
+                                last_scroll_event=ev[i].time.tv_sec * 1000000 + ev[i].time.tv_usec;
+                     }
+		     if(0) {
+                     printf("EventC: time %ld.%06ld, type %d (%s), code %d, value %d\n",
+                             ev[i].time.tv_sec, ev[i].time.tv_usec, ev[i].type,
+                             events[ev[i].type] ? events[ev[i].type] : "?",
+                             ev[i].code,
+                             ev[i].value);
+		     }
+	}
+     }
+     printf("Thread loop finished\n");
+}
+
 int main(int argc, char **argv)
 {
 	sp_session *sp;
 	sp_error err;
 	int next_timeout = 0;
+        int status;
 	const char *username = NULL;
 	const char *password = NULL;
 	int opt;
@@ -530,6 +654,7 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
+
 	audio_init(&g_audiofifo);
 
 	/* Create session */
@@ -550,6 +675,8 @@ int main(int argc, char **argv)
 
 	sp_session_login(sp, username, password, 0, NULL);
 	pthread_mutex_lock(&g_notify_mutex);
+
+	pthread_create (&evdev_thread, NULL,&process_evdev_events, NULL );
 
 	for (;;) {
 		if (next_timeout == 0) {
