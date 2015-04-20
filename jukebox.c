@@ -44,10 +44,14 @@
 #include <alsa/asoundlib.h>
 
 #include <linux/input.h>
+#include "lpd8806.h"
+#include "jukebox.h"
 
 pthread_t evdev_thread;
+pthread_t lpd_thread;
 int clic_start_time;
 int last_scroll_event;
+
 char *events[EV_MAX + 1] = {
         [0 ... EV_MAX] = NULL,
         [EV_SYN] = "Sync",                      [EV_KEY] = "Key",
@@ -134,7 +138,9 @@ static void try_jukebox_start(void)
 	g_currenttrack = t;
 
 	printf("jukebox: Now playing \"%s\"...\n", sp_track_name(t));
+	pthread_mutex_lock(&playback_status_lock);
         is_playing=1;
+	pthread_mutex_unlock(&playback_status_lock);
 	fflush(stdout);
 
 	sp_session_player_load(g_sess, t);
@@ -550,24 +556,25 @@ void SetAlsaMasterVolume(int direction)
 void
 media_toggle_playback ()
 {
+    pthread_mutex_lock(&playback_status_lock);
     if (is_playing)
       {
 	  printf ("pausing playback\n");
-	  sp_session_player_play (g_sess, 0);
       }
     else
       {
 	  printf ("resuming playback\n");
-	  sp_session_player_play (g_sess, 1);
 	  try_jukebox_start ();
       }
     is_playing = !is_playing;
+    sp_session_player_play (g_sess, 0);
+    pthread_mutex_unlock(&playback_status_lock);
 }
 
 void *
 process_evdev_events(void )
 {
-     int evdev_fd, spi_fd;
+     int evdev_fd;
      struct input_event ev[64];
      int clic_duration;
      int i;
@@ -676,7 +683,10 @@ int main(int argc, char **argv)
 	sp_session_login(sp, username, password, 0, NULL);
 	pthread_mutex_lock(&g_notify_mutex);
 
+	pthread_mutex_init(&playback_status_lock, NULL);
+
 	pthread_create (&evdev_thread, NULL,&process_evdev_events, NULL );
+	pthread_create (&lpd_thread, NULL,&spi_handler, NULL );
 
 	for (;;) {
 		if (next_timeout == 0) {
